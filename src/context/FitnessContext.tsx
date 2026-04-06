@@ -1,5 +1,8 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { GoogleGenAI } from '@google/genai';
+import { auth, db, signInWithGoogle, logOut, handleFirestoreError, OperationType } from '../firebase';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import { doc, onSnapshot, setDoc, getDoc } from 'firebase/firestore';
 
 // Initial Data from PDF
 const initialDietPlan = {
@@ -151,6 +154,10 @@ type ProgressEntry = {
 };
 
 type FitnessContextType = {
+  user: User | null;
+  isAuthReady: boolean;
+  signIn: () => Promise<void>;
+  signOut: () => Promise<void>;
   dietPlan: any;
   setDietPlan: (plan: any) => void;
   workoutPlan: any;
@@ -168,70 +175,110 @@ type FitnessContextType = {
 const FitnessContext = createContext<FitnessContextType | undefined>(undefined);
 
 export const FitnessProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  
   const [dietPlan, setDietPlan] = useState(initialDietPlan);
   const [workoutPlan, setWorkoutPlan] = useState(initialWorkoutPlan);
   const [progress, setProgress] = useState<ProgressEntry[]>([]);
   const [dailyTracking, setDailyTracking] = useState<Record<string, { meals: Record<string, boolean>, workouts: Record<string, boolean> }>>({});
   const [isUpdatingPlan, setIsUpdatingPlan] = useState(false);
 
-  // Load from local storage on mount
+  // Auth Listener
   useEffect(() => {
-    const savedProgress = localStorage.getItem('fitness_progress');
-    if (savedProgress) setProgress(JSON.parse(savedProgress));
-
-    const savedTracking = localStorage.getItem('fitness_tracking');
-    if (savedTracking) setDailyTracking(JSON.parse(savedTracking));
-
-    const savedDiet = localStorage.getItem('fitness_diet');
-    if (savedDiet) setDietPlan(JSON.parse(savedDiet));
-
-    const savedWorkout = localStorage.getItem('fitness_workout');
-    if (savedWorkout) setWorkoutPlan(JSON.parse(savedWorkout));
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
   }, []);
 
-  // Save to local storage on change
+  // Firestore Sync
   useEffect(() => {
-    localStorage.setItem('fitness_progress', JSON.stringify(progress));
-    localStorage.setItem('fitness_tracking', JSON.stringify(dailyTracking));
-    localStorage.setItem('fitness_diet', JSON.stringify(dietPlan));
-    localStorage.setItem('fitness_workout', JSON.stringify(workoutPlan));
-  }, [progress, dailyTracking, dietPlan, workoutPlan]);
+    if (!isAuthReady) return;
+
+    if (user) {
+      const userDocRef = doc(db, 'users', user.uid);
+      
+      // Check if document exists, if not create it with initial data
+      getDoc(userDocRef).then((docSnap) => {
+        if (!docSnap.exists()) {
+          setDoc(userDocRef, {
+            uid: user.uid,
+            dietPlan: JSON.stringify(initialDietPlan),
+            workoutPlan: JSON.stringify(initialWorkoutPlan),
+            progress: JSON.stringify([]),
+            dailyTracking: JSON.stringify({})
+          }).catch(err => handleFirestoreError(err, OperationType.CREATE, 'users/' + user.uid));
+        }
+      }).catch(err => handleFirestoreError(err, OperationType.GET, 'users/' + user.uid));
+
+      const unsubscribe = onSnapshot(userDocRef, (docSnap) => {
+        if (docSnap.exists()) {
+          const data = docSnap.data();
+          if (data.dietPlan) setDietPlan(JSON.parse(data.dietPlan));
+          if (data.workoutPlan) setWorkoutPlan(JSON.parse(data.workoutPlan));
+          if (data.progress) setProgress(JSON.parse(data.progress));
+          if (data.dailyTracking) setDailyTracking(JSON.parse(data.dailyTracking));
+        }
+      }, (error) => {
+        handleFirestoreError(error, OperationType.GET, 'users/' + user.uid);
+      });
+
+      return () => unsubscribe();
+    } else {
+      // Reset to initial state when logged out
+      setDietPlan(initialDietPlan);
+      setWorkoutPlan(initialWorkoutPlan);
+      setProgress([]);
+      setDailyTracking({});
+    }
+  }, [user, isAuthReady]);
+
+  // Save to Firestore helper
+  const saveToFirestore = async (updates: any) => {
+    if (!user) return;
+    try {
+      const userDocRef = doc(db, 'users', user.uid);
+      await setDoc(userDocRef, updates, { merge: true });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, 'users/' + user.uid);
+    }
+  };
 
   const addProgress = (entry: ProgressEntry) => {
-    setProgress(prev => [...prev, entry]);
+    const newProgress = [...progress, entry];
+    setProgress(newProgress);
+    saveToFirestore({ progress: JSON.stringify(newProgress) });
     updatePlanWithAI(entry);
   };
 
   const toggleMealTracking = (date: string, mealId: string) => {
-    setDailyTracking(prev => {
-      const dayData = prev[date] || { meals: {}, workouts: {} };
-      return {
-        ...prev,
-        [date]: {
-          ...dayData,
-          meals: {
-            ...dayData.meals,
-            [mealId]: !dayData.meals[mealId]
-          }
-        }
-      };
-    });
+    const newTracking = { ...dailyTracking };
+    const dayData = newTracking[date] || { meals: {}, workouts: {} };
+    newTracking[date] = {
+      ...dayData,
+      meals: {
+        ...dayData.meals,
+        [mealId]: !dayData.meals[mealId]
+      }
+    };
+    setDailyTracking(newTracking);
+    saveToFirestore({ dailyTracking: JSON.stringify(newTracking) });
   };
 
   const toggleWorkoutTracking = (date: string, exerciseName: string) => {
-    setDailyTracking(prev => {
-      const dayData = prev[date] || { meals: {}, workouts: {} };
-      return {
-        ...prev,
-        [date]: {
-          ...dayData,
-          workouts: {
-            ...dayData.workouts,
-            [exerciseName]: !dayData.workouts[exerciseName]
-          }
-        }
-      };
-    });
+    const newTracking = { ...dailyTracking };
+    const dayData = newTracking[date] || { meals: {}, workouts: {} };
+    newTracking[date] = {
+      ...dayData,
+      workouts: {
+        ...dayData.workouts,
+        [exerciseName]: !dayData.workouts[exerciseName]
+      }
+    };
+    setDailyTracking(newTracking);
+    saveToFirestore({ dailyTracking: JSON.stringify(newTracking) });
   };
 
   const generateAIAdvice = async (prompt: string) => {
@@ -295,9 +342,20 @@ export const FitnessProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (response.text) {
         const result = JSON.parse(response.text);
-        if (result.dietPlan) setDietPlan(result.dietPlan);
-        if (result.workoutPlan) setWorkoutPlan(result.workoutPlan);
-        // We could store the coach message or show a toast, for now we just update the plans
+        
+        const updates: any = {};
+        if (result.dietPlan) {
+          setDietPlan(result.dietPlan);
+          updates.dietPlan = JSON.stringify(result.dietPlan);
+        }
+        if (result.workoutPlan) {
+          setWorkoutPlan(result.workoutPlan);
+          updates.workoutPlan = JSON.stringify(result.workoutPlan);
+        }
+        
+        if (Object.keys(updates).length > 0) {
+          saveToFirestore(updates);
+        }
       }
     } catch (error) {
       console.error("Error updating plan with AI:", error);
@@ -308,6 +366,7 @@ export const FitnessProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <FitnessContext.Provider value={{
+      user, isAuthReady, signIn: signInWithGoogle, signOut: logOut,
       dietPlan, setDietPlan,
       workoutPlan, setWorkoutPlan,
       progress, addProgress,

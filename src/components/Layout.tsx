@@ -1,10 +1,12 @@
 import React from 'react';
 import { Outlet, Link, useLocation } from 'react-router-dom';
-import { Activity, Utensils, LineChart, MessageSquare, LayoutDashboard } from 'lucide-react';
+import { Activity, Utensils, LineChart, MessageSquare, LayoutDashboard, LogOut } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { useFitness } from '../context/FitnessContext';
 
 export default function Layout() {
   const location = useLocation();
+  const { user, signOut } = useFitness();
 
   const navItems = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard },
@@ -71,14 +73,23 @@ export default function Layout() {
           })}
         </nav>
         <div className="p-4 m-4 bg-gradient-to-br from-blue-50 to-indigo-50 rounded-2xl border border-blue-100">
-          <div className="flex items-center space-x-3 mb-2">
-            <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
-              <span className="text-blue-700 font-bold">B</span>
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center space-x-3">
+              {user?.photoURL ? (
+                <img src={user.photoURL} alt={user.displayName || 'User'} className="w-10 h-10 rounded-full" referrerPolicy="no-referrer" />
+              ) : (
+                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center">
+                  <span className="text-blue-700 font-bold">{user?.displayName?.[0] || 'U'}</span>
+                </div>
+              )}
+              <div className="overflow-hidden">
+                <p className="text-sm font-semibold text-slate-800 truncate">{user?.displayName || 'User'}</p>
+                <p className="text-xs text-slate-500 truncate">{user?.email}</p>
+              </div>
             </div>
-            <div>
-              <p className="text-sm font-semibold text-slate-800">Bhavesh</p>
-              <p className="text-xs text-slate-500">Pro Member</p>
-            </div>
+            <button onClick={signOut} className="p-2 text-slate-500 hover:text-red-600 transition-colors" title="Sign out">
+              <LogOut className="w-4 h-4" />
+            </button>
           </div>
         </div>
       </aside>
